@@ -2,6 +2,6 @@
 
 Zadaci sa časa programiranja.
 
-**Sajt:** https://mlazicm.github.io/sveska/
+**Sajt:** https://lazicmilos.github.io/sveska/
 
 **Uređivanje (samo za mene, traži token):** https://mlazicm.github.io/sveska/upload.html
