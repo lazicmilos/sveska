@@ -23,7 +23,7 @@ const GITHUB_ICON_SVG =
 // icon markup and the profile URL are defined once instead of per page.
 function mountGithubLink() {
   const host = document.querySelector(".head-actions");
-  if (!host) return;
+  if (!host || !SITE.owner) return;
   host.insertAdjacentHTML("afterbegin",
     '<a class="icon-link" href="' + SITE.profileUrl + '" target="_blank" rel="noopener"' +
     ' title="Moj GitHub profil" aria-label="Otvori moj GitHub profil">' + GITHUB_ICON_SVG + '</a>');
