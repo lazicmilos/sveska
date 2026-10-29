@@ -235,7 +235,8 @@ function applyFilter() {
 async function load() {
   const statusEl = document.getElementById("status");
   try {
-    allEntries = await Promise.all((await loadCode()).map(withSources));
+    // loadCode gives newest first; tasks read in class order, oldest first.
+    allEntries = await Promise.all((await loadCode()).reverse().map(withSources));
     document.getElementById("toolbar").hidden = allEntries.length === 0;
     document.getElementById("search").addEventListener("input", applyFilter);
     render(allEntries);
