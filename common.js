@@ -30,7 +30,8 @@ function mountGithubLink() {
 }
 
 // Fetches a public JSON index (entries.json or kod.json) and returns the
-// entries that pass isValid, newest first. A missing file means no entries yet.
+// entries that pass isValid, oldest first: tasks read in the order they were
+// done in class. A missing file means no entries yet.
 async function loadIndex(path, isValid) {
   const res = await fetch(path + "?t=" + Date.now(), { cache: "no-store" });
   if (res.status === 404) return [];
@@ -41,7 +42,7 @@ async function loadIndex(path, isValid) {
 
   return data
     .filter(function (e) { return e && isValid(e); })
-    .sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); });
+    .sort(function (a, b) { return (a.createdAt || 0) - (b.createdAt || 0); });
 }
 
 function loadEntries() {

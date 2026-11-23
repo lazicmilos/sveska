@@ -116,7 +116,7 @@
     <div id="listStatus" class="empty">Učitavanje.</div>
     <div id="grid" class="grid" hidden></div>
 
-    <div style="margin-top:28px">
+    <div class="logout-row">
       <button class="ghost" id="logoutBtn" type="button">Odjavi se sa ovog uređaja</button>
     </div>
   </div>
@@ -203,68 +203,6 @@ async function getJsonFile(path, ref) {
   return { entries: entries, sha: data.sha };
 }
 
-async function putFile(path, contentB64, message, sha) {
-  const body = { message: message, content: contentB64, branch: SITE.branch };
-  if (sha) body.sha = sha;
-  const res = await gh(SITE.apiBase + "/contents/" + path, {
-    method: "PUT",
-    headers: Object.assign(ghHeaders(), { "Content-Type": "application/json" }),
-    body: JSON.stringify(body)
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    const err = new Error(ghError(res.status, text));
-    err.status = res.status;
-    throw err;
-  }
-  return res.json();
-}
-
-async function deleteFile(path, sha, message) {
-  const res = await gh(SITE.apiBase + "/contents/" + path, {
-    method: "DELETE",
-    headers: Object.assign(ghHeaders(), { "Content-Type": "application/json" }),
-    body: JSON.stringify({ message: message, sha: sha, branch: SITE.branch })
-  });
-  if (!res.ok) {
-    const err = new Error(ghError(res.status, await res.text()));
-    err.status = res.status;
-    throw err;
-  }
-}
-
-async function deleteRepoFile(path, message) {
-  const res = await gh(SITE.apiBase + "/contents/" + path + "?ref=" + SITE.branch + "&t=" + Date.now());
-  if (!res.ok) return false;
-  const data = await res.json();
-  await deleteFile(path, data.sha, message);
-  return true;
-}
-
-// Reads a JSON index file, applies mutate(entries) -> newEntries, writes it back.
-// Retries with a fresh sha when GitHub reports a write conflict (409 or 422),
-// because another write landed between our read and our write.
-async function updateJsonFile(path, mutate, message) {
-  let lastErr;
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    const current = await getJsonFile(path);
-    const newEntries = mutate(current.entries.slice());
-    const content = utf8ToB64(JSON.stringify(newEntries, null, 2));
-    try {
-      await putFile(path, content, message, current.sha);
-      return newEntries;
-    } catch (err) {
-      lastErr = err;
-      if (err.status === 409 || err.status === 422) {
-        await new Promise(function (r) { setTimeout(r, 250 * (attempt + 1)); });
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw lastErr;
-}
-
 async function ghJson(url, method, body) {
   const res = await gh(url, method ? {
     method: method,
@@ -279,31 +217,36 @@ async function ghJson(url, method, body) {
   return res.json();
 }
 
-// Writes every change of a code task in one commit through the Git Data API,
-// so a multi-file task is saved or removed as a whole. The contents API needs
-// one commit per file and leaves half a task behind when a later call fails.
-// build(entries) gets the kod.json entries at the current head and returns
-// { entries, files: [{ path, content }] }; content null deletes the file.
-async function commitCodeChanges(build, message) {
+// Writes every change of a task in one commit through the Git Data API, so a
+// task is saved or removed as a whole: its index entry together with its code
+// files or its image. The contents API needs one commit per file and leaves
+// half a task behind when a later call fails.
+// build(entries) gets the entries of indexPath at the current head and returns
+// { entries, files }. Each file is { path, content } with UTF-8 text, or
+// { path, sha } with a blob from createBlob; content null deletes the file.
+async function commitChanges(indexPath, build, message) {
   let lastErr;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const ref = await ghJson(SITE.apiBase + "/git/ref/heads/" + SITE.branch);
     const headSha = ref.object.sha;
     const head = await ghJson(SITE.apiBase + "/git/commits/" + headSha);
-    const current = await getJsonFile(CODE_PATH, headSha);
+    const current = await getJsonFile(indexPath, headSha);
     const change = build(current.entries.slice());
 
     const tree = change.files.map(function (f) {
-      return f.content === null
-        ? { path: f.path, mode: "100644", type: "blob", sha: null }
-        : { path: f.path, mode: "100644", type: "blob", content: f.content };
+      const node = { path: f.path, mode: "100644", type: "blob" };
+      if (f.sha) node.sha = f.sha;
+      else if (f.content === null) node.sha = null;
+      else node.content = f.content;
+      return node;
     });
-    tree.push({ path: CODE_PATH, mode: "100644", type: "blob", content: JSON.stringify(change.entries, null, 2) });
+    tree.push({ path: indexPath, mode: "100644", type: "blob", content: JSON.stringify(change.entries, null, 2) });
 
     const newTree = await ghJson(SITE.apiBase + "/git/trees", "POST", { base_tree: head.tree.sha, tree: tree });
     const commit = await ghJson(SITE.apiBase + "/git/commits", "POST", {
       message: message, tree: newTree.sha, parents: [headSha]
     });
+
     try {
       // Not forced: if another commit landed since we read the head, GitHub
       // rejects this as a non-fast-forward and we rebuild on the new head.
@@ -319,6 +262,14 @@ async function commitCodeChanges(build, message) {
     }
   }
   throw lastErr;
+}
+
+// Uploads binary content (an image) as a blob for commitChanges. A blob is in
+// no commit until a tree points to it, so a save that fails later leaves
+// nothing behind in the repo.
+async function createBlob(base64) {
+  const blob = await ghJson(SITE.apiBase + "/git/blobs", "POST", { content: base64, encoding: "base64" });
+  return blob.sha;
 }
 
 // What gets uploaded from a picked folder: source files only. Build output, IDE
@@ -421,30 +372,24 @@ function resetCodeForm() {
   showCodePick();
 }
 
-async function refreshCodeList() {
-  const listStatus = document.getElementById("codeListStatus");
-  const list = document.getElementById("codeList");
+function deleteButtonHtml(e, cls) {
+  return '<button class="' + cls + '" type="button" data-id="' + esc(e.id) + '" data-title="' + esc(e.title) + '">Obriši</button>';
+}
 
-  listStatus.hidden = false;
-  listStatus.textContent = "Učitavanje.";
-  list.hidden = true;
-
-  try {
-    const result = await getJsonFile(CODE_PATH);
-    const entries = result.entries
-      .filter(function (e) { return e && e.id && codeFiles(e).length > 0; })
-      .sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); });
-
-    document.getElementById("codeCount").textContent = "Kod: " + entries.length;
-
-    if (entries.length === 0) {
-      listStatus.textContent = "Nema još nijednog zadatka sa kodom.";
-      return;
-    }
-
-    listStatus.hidden = true;
-    list.hidden = false;
-    list.innerHTML = entries.map(function (e) {
+// The two kinds of tasks differ in their index file, how a row looks and which
+// repo files belong to an entry. Listing and deleting work the same for both.
+const KINDS = {
+  code: {
+    index: CODE_PATH,
+    statusId: "codeListStatus",
+    listId: "codeList",
+    countId: "codeCount",
+    emptyText: "Nema još nijednog zadatka sa kodom.",
+    deleteMessage: "Ukloni zadatak sa kodom: ",
+    isValid: function (e) { return e.id && codeFiles(e).length > 0; },
+    countText: function (n) { return "Kod: " + n; },
+    files: function (e) { return codeFiles(e).map(function (f) { return f.path; }); },
+    rowHtml: function (e) {
       const files = codeFiles(e);
       return '<div class="code-row">' +
         '<div class="code-row-main">' +
@@ -453,34 +398,87 @@ async function refreshCodeList() {
             esc(files.length === 1 ? files[0].name : plural(files.length, "fajl", "fajla", "fajlova")) +
           '</span>' + fmtDate(e.createdAt) + '</div>' +
         '</div>' +
-        '<button class="ghost danger" type="button" data-id="' + esc(e.id) + '" data-title="' + esc(e.title) + '">Obriši</button>' +
+        deleteButtonHtml(e, "ghost danger") +
       '</div>';
-    }).join("");
+    }
+  },
+  image: {
+    index: ENTRIES_PATH,
+    statusId: "listStatus",
+    listId: "grid",
+    countId: "count",
+    emptyText: "Nema još nijednog zadatka.",
+    deleteMessage: "Ukloni zadatak: ",
+    isValid: function (e) { return e.id && e.title; },
+    countText: function (n) { return plural(n, "zadatak", "zadatka", "zadataka"); },
+    files: function (e) { return e.imagePath ? [e.imagePath] : []; },
+    rowHtml: function (e) {
+      return '<div class="card">' +
+        '<img src="' + esc(e.imagePath) + '" alt="Zadatak: ' + esc(e.title) + '" loading="lazy">' +
+        deleteButtonHtml(e, "del-btn") +
+        '<div class="meta">' +
+          '<div class="t">' + esc(e.title) + '</div>' +
+          '<div class="s"><span class="tag">' + esc(e.subject || "Opšte") + '</span>' + fmtDate(e.createdAt) + '</div>' +
+        '</div>' +
+      '</div>';
+    }
+  }
+};
 
-    list.querySelectorAll("button[data-id]").forEach(function (btn) {
-      btn.addEventListener("click", function () {
+// Reads the index through the API rather than from Pages, so a change shows at
+// once instead of after the Pages build. Newest first, unlike the public pages:
+// this is where a task that was just added gets checked or removed.
+async function refreshList(kind) {
+  const statusEl = document.getElementById(kind.statusId);
+  const listEl = document.getElementById(kind.listId);
+
+  statusEl.hidden = false;
+  statusEl.textContent = "Učitavanje.";
+  listEl.hidden = true;
+
+  try {
+    const entries = (await getJsonFile(kind.index)).entries
+      .filter(function (e) { return e && kind.isValid(e); })
+      .sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); });
+
+    document.getElementById(kind.countId).textContent = kind.countText(entries.length);
+
+    if (entries.length === 0) {
+      statusEl.textContent = kind.emptyText;
+      return;
+    }
+
+    statusEl.hidden = true;
+    listEl.hidden = false;
+    listEl.innerHTML = entries.map(kind.rowHtml).join("");
+
+    listEl.querySelectorAll("button[data-id]").forEach(function (btn) {
+      btn.addEventListener("click", function (ev) {
+        ev.stopPropagation();
         if (!confirm('Obrisati zadatak "' + btn.dataset.title + '"?')) return;
-        removeCodeEntry(btn.dataset.id, btn, btn.dataset.title);
+        removeEntry(kind, btn.dataset.id, btn);
       });
     });
   } catch (err) {
-    listStatus.hidden = false;
-    listStatus.textContent = "Ne mogu da učitam listu. " + err.message;
+    statusEl.hidden = false;
+    statusEl.textContent = "Ne mogu da učitam listu. " + err.message;
   }
 }
 
-async function removeCodeEntry(id, btn, title) {
+// Removes the entry and every repo file it points to, in one commit.
+async function removeEntry(kind, id, btn) {
+  const title = btn.dataset.title;
   btn.disabled = true;
   btn.textContent = "Brisanje";
   try {
-    await commitCodeChanges(function (entries) {
+    await commitChanges(kind.index, function (entries) {
       const target = entries.find(function (e) { return e.id === id; });
       return {
         entries: entries.filter(function (e) { return e.id !== id; }),
-        files: target ? codeFiles(target).map(function (f) { return { path: f.path, content: null }; }) : []
+        files: target ? kind.files(target).map(function (path) { return { path: path, content: null }; }) : []
       };
-    }, "Ukloni zadatak sa kodom: " + title);
-    await refreshCodeList();
+    }, kind.deleteMessage + title);
+    await refreshList(kind);
   } catch (err) {
     alert("Brisanje nije uspelo. " + err.message);
     btn.disabled = false;
@@ -537,79 +535,6 @@ function setBusy(busy, label) {
   btn.innerHTML = busy ? '<span class="spinner"></span>' + (label || "Snimanje") : "Sačuvaj zadatak";
 }
 
-async function refreshList() {
-  const listStatus = document.getElementById("listStatus");
-  const grid = document.getElementById("grid");
-  const countEl = document.getElementById("count");
-
-  listStatus.hidden = false;
-  listStatus.textContent = "Učitavanje.";
-  grid.hidden = true;
-
-  try {
-    const result = await getJsonFile(ENTRIES_PATH);
-    const entries = result.entries
-      .filter(function (e) { return e && e.id && e.title; })
-      .sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); });
-
-    countEl.textContent = entries.length === 1 ? "1 zadatak" : entries.length + " zadataka";
-
-    if (entries.length === 0) {
-      listStatus.textContent = "Nema još nijednog zadatka.";
-      return;
-    }
-
-    listStatus.hidden = true;
-    grid.hidden = false;
-    grid.innerHTML = entries.map(function (e) {
-      return '<div class="card">' +
-        '<img src="' + esc(e.imagePath) + '" alt="Zadatak: ' + esc(e.title) + '" loading="lazy">' +
-        '<button class="del-btn" type="button" data-id="' + esc(e.id) + '" data-title="' + esc(e.title) + '">Obriši</button>' +
-        '<div class="meta">' +
-          '<div class="t">' + esc(e.title) + '</div>' +
-          '<div class="s"><span class="tag">' + esc(e.subject || "Opšte") + '</span>' + fmtDate(e.createdAt) + '</div>' +
-        '</div>' +
-      '</div>';
-    }).join("");
-
-    grid.querySelectorAll(".del-btn").forEach(function (btn) {
-      btn.addEventListener("click", function (ev) {
-        ev.stopPropagation();
-        if (!confirm('Obrisati zadatak "' + btn.dataset.title + '"?')) return;
-        removeEntry(ENTRIES_PATH, btn.dataset.id, btn, btn.dataset.title, refreshList);
-      });
-    });
-  } catch (err) {
-    listStatus.hidden = false;
-    listStatus.textContent = "Ne mogu da učitam listu. " + err.message;
-  }
-}
-
-// Removes an entry from an index file, then the image it points to.
-async function removeEntry(indexPath, id, btn, title, refresh) {
-  if (btn) { btn.disabled = true; btn.textContent = "Brisanje"; }
-  try {
-    let target = null;
-    await updateJsonFile(indexPath, function (entries) {
-      target = entries.find(function (e) { return e.id === id; }) || null;
-      return entries.filter(function (e) { return e.id !== id; });
-    }, "Ukloni zadatak: " + (title || id));
-
-    if (target && target.imagePath) {
-      try {
-        await deleteRepoFile(target.imagePath, "Ukloni sliku: " + target.title);
-      } catch (e) {
-        // Entry is already gone from the list, so a leftover image file is
-        // harmless. Not worth failing the delete over.
-      }
-    }
-    await refresh();
-  } catch (err) {
-    alert("Brisanje nije uspelo. " + err.message);
-    if (btn) { btn.disabled = false; btn.textContent = "Obriši"; }
-  }
-}
-
 document.getElementById("fileInput").addEventListener("change", async function (e) {
   const file = e.target.files[0];
   if (!file) return;
@@ -659,14 +584,13 @@ document.getElementById("entryForm").addEventListener("submit", async function (
 
   const id = String(Date.now()) + "-" + Math.random().toString(36).slice(2, 8);
   const imagePath = "images/" + id + ".jpg";
-  let imageUploaded = false;
 
   try {
-    await putFile(imagePath, imgDataUrl.split(",")[1], "Dodaj sliku: " + naslov);
-    imageUploaded = true;
+    // The blob is created once, outside the retry loop in commitChanges.
+    const imageSha = await createBlob(imgDataUrl.split(",")[1]);
 
     setBusy(true, "Upisivanje");
-    await updateJsonFile(ENTRIES_PATH, function (entries) {
+    await commitChanges(ENTRIES_PATH, function (entries) {
       entries.push({
         id: id,
         title: naslov,
@@ -675,7 +599,7 @@ document.getElementById("entryForm").addEventListener("submit", async function (
         imagePath: imagePath,
         createdAt: Date.now()
       });
-      return entries;
+      return { entries: entries, files: [{ path: imagePath, sha: imageSha }] };
     }, "Dodaj zadatak: " + naslov);
 
     document.getElementById("naslov").value = "";
@@ -688,15 +612,8 @@ document.getElementById("entryForm").addEventListener("submit", async function (
 
     statusMsg.innerHTML = '<span class="ok-msg">Sačuvano.</span>';
     setTimeout(function () { statusMsg.textContent = ""; }, 4000);
-    await refreshList();
+    await refreshList(KINDS.image);
   } catch (err) {
-    // If the image landed but the index write failed, remove the image so it
-    // does not sit in the repo unreferenced by any entry.
-    if (imageUploaded) {
-      try {
-        await deleteRepoFile(imagePath, "Poništi nedovršeni upload: " + naslov);
-      } catch (e) {}
-    }
     showErr("formErr", "Snimanje nije uspelo. " + err.message);
   } finally {
     setBusy(false);
@@ -742,7 +659,7 @@ document.getElementById("codeForm").addEventListener("submit", async function (e
   statusMsg.textContent = "";
 
   try {
-    await commitCodeChanges(function (entries) {
+    await commitChanges(CODE_PATH, function (entries) {
       entries.push({
         id: id,
         title: title,
@@ -759,7 +676,7 @@ document.getElementById("codeForm").addEventListener("submit", async function (e
     resetCodeForm();
     statusMsg.innerHTML = '<span class="ok-msg">Sačuvano.</span>';
     setTimeout(function () { statusMsg.textContent = ""; }, 4000);
-    await refreshCodeList();
+    await refreshList(KINDS.code);
   } catch (err) {
     showErr("codeErr", "Snimanje nije uspelo. " + err.message);
   } finally {
@@ -798,7 +715,7 @@ document.getElementById("gateForm").addEventListener("submit", async function (e
   }
 });
 
-document.getElementById("refreshBtn").addEventListener("click", refreshList);
+document.getElementById("refreshBtn").addEventListener("click", function () { refreshList(KINDS.image); });
 
 document.getElementById("logoutBtn").addEventListener("click", function () {
   if (!confirm("Ukloniti token sa ovog uređaja?")) return;
@@ -809,8 +726,8 @@ document.getElementById("logoutBtn").addEventListener("click", function () {
 function enterApp() {
   document.getElementById("gateForm").hidden = true;
   document.getElementById("app").hidden = false;
-  refreshCodeList();
-  refreshList();
+  refreshList(KINDS.code);
+  refreshList(KINDS.image);
 }
 
 mountGithubLink();
