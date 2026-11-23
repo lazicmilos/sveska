@@ -51,7 +51,7 @@ function render(entries) {
   const statusEl = document.getElementById("status");
   const countEl = document.getElementById("count");
 
-  countEl.textContent = entries.length === 1 ? "1 zadatak" : entries.length + " zadataka";
+  countEl.textContent = plural(entries.length, "zadatak", "zadatka", "zadataka");
 
   if (entries.length === 0) {
     grid.hidden = true;
@@ -174,7 +174,7 @@ function openModal(e) {
 
   root.innerHTML = '<div class="lightbox" id="lb" role="dialog" aria-modal="true" aria-label="' + esc(e.title) + '">' +
     '<div class="lb-bar">' +
-      '<div style="min-width:0">' +
+      '<div class="lb-head">' +
         '<div class="lb-title">' + esc(e.title) + '</div>' +
         '<div class="lb-meta"><span class="tag">' + esc(e.subject) + '</span>' + fmtDate(e.createdAt) + '</div>' +
       '</div>' +

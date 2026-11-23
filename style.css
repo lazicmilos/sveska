@@ -467,6 +467,8 @@ button.ghost:hover { border-color: #d6d1cb; color: var(--ink); }
   flex-wrap: wrap;
 }
 
+.lb-head { min-width: 0; }
+
 .lb-title {
   color: #f5f3f1;
   font-size: 15px;
@@ -584,6 +586,8 @@ button.ghost:hover { border-color: #d6d1cb; color: var(--ink); }
 .icon-link:visited { color: var(--muted); }
 .icon-link:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .icon-link svg { width: 17px; height: 17px; display: block; }
+
+.logout-row { margin-top: 28px; }
 
 .section-sep { border: none; border-top: 1px solid var(--line); margin: 36px 0 28px; }
 

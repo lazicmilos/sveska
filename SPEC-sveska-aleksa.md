@@ -2,7 +2,9 @@
 
 Ovaj dokument opisuje kako da napraviš novu svesku za Aleksu. **Funkcionalnost je ista kao u `lazicmilos/sveska`. Menja se samo dizajn.** Sve što piše ispod u delu „Funkcije“ je obavezno ponašanje. Deo „Dizajn“ je mesto gde imaš slobodu.
 
-Pravilo za ceo projekat: ako nešto nije opisano ovde, ponašaj se kao originalna sveska. Ako originalna sveska ima bag (vidi deo 8), **nemoj ga kopirati**.
+**Ovo nije klon Milošove sveske.** Pravi se ista aplikacija, ali za Aleksu: njegov GitHub nalog, njegov repo, njegovi zadaci. Kopira se **samo kod** (`*.html`, `config.js`, `common.js`). Iz originala se **ne kopira**: `entries.json`, `kod.json`, `images/`, `kod/`, `sveska-link.md`. Aleksina sveska na početku nema nijedan zadatak.
+
+Pravilo za ceo projekat: ako nešto nije opisano ovde, ponašaj se kao originalna sveska.
 
 ---
 
@@ -116,7 +118,7 @@ Oba fajla mogu da ne postoje: 404 znači „nema zadataka“, ne grešku.
 | `esc(s)` | Escape-uje `& < > " '`. `null`/`undefined` postaju `""` |
 | `fmtDate(ts)` | Datum u `sr-RS` formatu, `""` za neispravan timestamp |
 | `mountGithubLink()` | Ubacuje GitHub ikonicu (link na `SITE.profileUrl`, `target="_blank" rel="noopener"`) kao prvi element u `.head-actions` |
-| `loadIndex(path, isValid)` | `fetch(path + "?t=" + Date.now(), { cache: "no-store" })`. 404 vraća `[]`. Ne-niz baca grešku. Vraća validne zapise, **najnovije prvo** |
+| `loadIndex(path, isValid)` | `fetch(path + "?t=" + Date.now(), { cache: "no-store" })`. 404 vraća `[]`. Ne-niz baca grešku. Vraća validne zapise, **najstarije prvo** |
 | `loadEntries()` | `loadIndex("entries.json", ...)` |
 | `codeFiles(e)` | Vraća `e.files`, ili stari format kao niz od jednog fajla |
 | `loadCode()` | `loadIndex("kod.json", ...)` |
@@ -134,7 +136,7 @@ Oba fajla mogu da ne postoje: 404 znači „nema zadataka“, ne grešku.
 
 **Stanja:** „Učitavanje.“, „Nema još nijednog zadatka.“, „Nijedan zadatak ne odgovara pretrazi.“, „Ne mogu da učitam svesku. Osveži stranicu za koji trenutak.“
 
-**Redosled:** najnovije prvo.
+**Redosled:** najstarije prvo, redosled sa časa. Sortira `loadIndex` u `common.js`, isto za obe javne stranice.
 
 **Lightbox** (`role="dialog"`, `aria-modal="true"`):
 
@@ -154,7 +156,7 @@ Oba fajla mogu da ne postoje: 404 znači „nema zadataka“, ne grešku.
 
 **Zaglavlje:** naslov „Zadaci“, GitHub ikonica, link „Nazad na svesku“.
 
-**Učitavanje:** `loadCode()`, pa **obrni redosled (najstarije prvo, redosled sa časa)**, pa paralelno učitaj sadržaj svih fajlova (`fetch(path + "?t=" + createdAt)`, `createdAt` služi kao verzija za keš). Fajl koji ne može da se učita dobija `code: null`.
+**Učitavanje:** `loadCode()` (već najstarije prvo), pa paralelno učitaj sadržaj svih fajlova (`fetch(path + "?t=" + createdAt)`, `createdAt` služi kao verzija za keš). Fajl koji ne može da se učita dobija `code: null`.
 
 **Toolbar:** brojač preko `plural()` + pretraga po naslovu, napomeni, imenima fajlova i **sadržaju koda**.
 
@@ -205,18 +207,23 @@ Filtriranje izbora (`readCodePick`):
 
 `safePath(name)`: po segmentu skida dijakritike (NFD), sve što nije `A-Za-z0-9._-` menja sa `-`, skida `-` i `.` sa početka, prazan segment postaje `fajl`.
 
-**Snimanje mora biti jedan atomski commit** (Git Data API), da zadatak sa više fajlova nikad ne ostane napola snimljen:
+**Svako dodavanje i brisanje, za oba tipa zadataka, je jedan atomski commit.** Radi ga `commitChanges(indexPath, build, message)` preko Git Data API-ja, da zadatak nikad ne ostane napola snimljen i da ne ostanu fajlovi na koje ništa ne pokazuje:
 
-1. `GET /git/ref/heads/main`, pa commit na vrhu, pa `kod.json` na tom commitu
-2. `build(entries)` vraća nove zapise i listu fajlova (`content: null` znači brisanje)
+1. `GET /git/ref/heads/main`, pa commit na vrhu, pa indeks (`kod.json` ili `entries.json`) na tom commitu
+2. `build(entries)` vraća nove zapise i listu fajlova: `{ path, content }` za tekst, `{ path, sha }` za blob, `content: null` za brisanje
 3. `POST /git/trees` sa `base_tree`, pa `POST /git/commits` sa jednim roditeljem
 4. `PATCH /git/refs/heads/main` **bez** `force`. Ako je u međuvremenu stigao drugi commit (409/422), ponovi od koraka 1, do 4 pokušaja, pauza `250 ms × pokušaj`
 
 Commit poruka: `Dodaj zadatak sa kodom: <naslov>`.
 
-#### Lista zadataka sa kodom
+#### Liste za uređivanje
 
-Čita `kod.json` preko API-ja (ne preko Pages, da se odmah vidi promena), najnovije prvo, brojač „Kod: N“. Svaki red ima naslov, oznaku, datum i dugme **Obriši** (uz `confirm`). Brisanje je jedan atomski commit koji uklanja zapis i sve njegove fajlove: `Ukloni zadatak sa kodom: <naslov>`.
+Obe liste (kod i slike) prikazuje **jedna** funkcija, `refreshList(kind)`. Razlike su u objektu `KINDS`: indeks, ID-jevi elemenata, tekst za prazno stanje, brojač, izgled reda i koji fajlovi u repou pripadaju zapisu.
+
+- Čita indeks preko API-ja (ne preko Pages, da se promena vidi odmah).
+- **Najnovije prvo.** Ovo namerno odstupa od javnih stranica, jer se ovde proverava ili briše ono što je upravo dodato.
+- Brojači: „Kod: N“ i `plural(n, "zadatak", "zadatka", "zadataka")`.
+- Dugme **Obriši** (uz `confirm`) poziva `removeEntry(kind, id, btn)`: jedan commit koji uklanja zapis i sve njegove fajlove. Poruke: `Ukloni zadatak sa kodom: <naslov>` / `Ukloni zadatak: <naslov>`.
 
 #### Novi zadatak sa slikom
 
@@ -224,12 +231,11 @@ Polja: naslov (obavezan), predmet (opciono, podrazumevano „Opšte“), napomen
 
 - Kompresija u browseru: najduža strana najviše 1400 px, JPEG kvalitet 0.75, bela pozadina (zbog PNG providnosti).
 - Pregled sa dugmetom `×` za uklanjanje i porukom „Spremno, oko N KB.“
-- Dugme za snimanje pokazuje spinner i fazu.
+- Slika se prvo šalje kao blob (`POST /git/blobs`, `encoding: "base64"`), samo jednom i van petlje ponovnih pokušaja. Zatim `commitChanges(ENTRIES_PATH, ...)` u jednom commitu dodaje zapis i sliku (`{ path, sha }`). Blob koji nije ni u jednom commitu ne ostaje u repou, pa neuspelo snimanje ne ostavlja ništa za čišćenje.
+- Dugme za snimanje pokazuje spinner i fazu („Slanje slike“, pa „Upisivanje“).
 - Posle uspeha: forma se prazni, „Sačuvano.“ 4 sekunde, lista se osvežava.
 
-#### Lista zadataka sa slikom
-
-Mreža kartica sa dugmetom **Obriši** na svakoj, plus „Osveži listu“. Brisanje uklanja zapis i sliku.
+Lista slika je mreža kartica sa dugmetom **Obriši** na svakoj i dugmetom „Osveži listu“.
 
 ## 7. Dizajn: šta je slobodno, a šta nije
 
@@ -252,20 +258,22 @@ Original je mirna, „papirna“ neutralna tema: topla bela (`#faf9f7`), skoro c
 
 Sve boje definiši kao CSS promenljive na `:root`, pa ih redefiniši za tamni režim. Nijedna boja ne sme biti ukucana direktno u pravilu.
 
-## 8. Šta original radi loše: popravi u novoj verziji
+## 8. Popravke koje su već unete u original
 
-Ovo nije opciono. Kopiranje bagova nije „ista funkcionalnost“.
+Prva verzija Milošove sveske imala je ove greške. Ispravljene su u originalu, pa se aktuelni kod može kopirati direktno. Spisak stoji ovde da se greške ne bi vratile pri pisanju novog dizajna.
 
-1. **Brojač u `index.html` i `upload.html` je pogrešan za 2 do 4.** Kod `entries.length === 1 ? "1 zadatak" : n + " zadataka"` daje „2 zadataka“. `plural()` već postoji u `common.js`, koristi ga svuda.
-2. **Upload slike nije atomski.** Original šalje sliku jednim commitom, pa `entries.json` drugim, i pokušava da obriše sliku ako drugi korak padne. Brisanje isto radi u dva koraka. Za kod već postoji `commitCodeChanges`. Uopšti ga u `commitChanges(indexPath, build, message)` i koristi ga za **oba** tipa zadataka. Slika ide u tree kao blob (`POST /git/blobs` sa `encoding: "base64"`, pa `sha` u tree). Rezultat: jedan commit, nema siročadi, briše se pola koda (`updateJsonFile`, `putFile`, `deleteFile`, `deleteRepoFile`).
-3. **Dupliran kod za listu u `upload.html`.** `refreshList` i `refreshCodeList` rade isto (učitaj, filtriraj, sortiraj, prikaži stanja). Napravi jednu funkciju koja prima renderer reda.
-4. **Inline stilovi** (`style="margin-top:28px"`, `style="min-width:0"`): prebaci u klase.
-5. **Nedosledan redosled:** galerija je najnovije prvo, kod najstarije prvo. Ako Aleksa ne želi drugačije, odluči jednom i napiši zašto u komentaru, ili dodaj prekidač za sortiranje.
+1. **Brojač** je za 2 do 4 pisao „2 zadataka“. Sada se svuda koristi `plural()`.
+2. **Upload slike nije bio atomski** (dva commita, ručno čišćenje kad drugi padne). Sada `commitChanges` važi za oba tipa zadataka. Uklonjeni su `putFile`, `deleteFile`, `deleteRepoFile` i `updateJsonFile`.
+3. **Dupliran kod za liste** u `upload.html`. Sada postoje jedan `refreshList(kind)` i jedan `removeEntry(kind, ...)`.
+4. **Inline stilovi** su prebačeni u klase `.lb-head` i `.logout-row`.
+5. **Redosled** je bio nedosledan. Javne stranice su sada najstarije prvo, uređivanje najnovije prvo, a razlog piše u komentaru.
+
+Nov dizajn ne sme da vrati ništa od ovoga. Posebno: nijedna boja ili razmak u `style="..."`.
 
 ## 9. Postavljanje
 
 1. Aleksa napravi javni repo `sveska` na svom nalogu.
-2. Kopiraj strukturu iz dela 3, sa praznim `entries.json` i `kod.json` (`[]`) i praznim folderima (`images/.gitkeep`, `kod/.gitkeep`).
+2. Kopiraj **samo kod** (`index.html`, `zadaci.html`, `upload.html`, `config.js`, `common.js`) i napiši nov `style.css`. Napravi prazne `entries.json` i `kod.json` (sadržaj `[]`) i prazne foldere (`images/.gitkeep`, `kod/.gitkeep`). Tvoji zadaci, slike i kod ne idu u Aleksin repo.
 3. U `config.js` upiši Aleksin username.
 4. *Settings → Pages → Deploy from branch → `main` / root.*
 5. Napravi fine-grained token (samo taj repo, *Contents: Read and write*, rok trajanja do kraja školske godine).
